@@ -293,4 +293,4 @@ This application is an educational tool. The AI-generated responses are based on
 
 ---
 
-*Built with ❤️ for the Muslim community*
+*Built with ❤️*
