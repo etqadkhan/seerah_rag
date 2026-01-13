@@ -66,8 +66,9 @@ seerah_rag/
 │   ├── db_manager.py
 │   └── models.py
 ├── data_pipeline/
-│   ├── transcript_fetcher.py
-│   └── knowledge_base.py
+│   ├── hf_data_loader.py       # Method 2: HuggingFace dataset loader (recommended)
+│   ├── transcript_fetcher.py   # Method 1: YouTube fetching (legacy)
+│   └── knowledge_base.py       # Embedding pipeline
 └── data/
     ├── chroma_db/            # Pre-built vector database (REQUIRED)
     └── transcripts/          # Downloaded transcripts (optional)

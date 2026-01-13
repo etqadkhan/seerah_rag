@@ -154,7 +154,12 @@ Stores:
       └─────────────┴──────────────┴────┴──────────────┴────┴──────────────┘
 ```
 
-### transcript_fetcher.py
+### Data Pipeline Modules
+
+#### hf_data_loader.py (Method 2 - Recommended)
+Loads cleaned transcripts from HuggingFace dataset. This is the recommended approach as it doesn't require API keys and provides better quality transcripts.
+
+#### transcript_fetcher.py (Method 1 - Legacy)
 
 ```python
 # Input: YouTube playlist URL
@@ -263,7 +268,8 @@ seerah_rag/
 │
 ├── data_pipeline/
 │   ├── __init__.py
-│   ├── transcript_fetcher.py   # YouTube transcript extraction
+│   ├── hf_data_loader.py       # HuggingFace dataset loader (Method 2 - recommended)
+│   ├── transcript_fetcher.py   # YouTube transcript extraction (Method 1 - legacy)
 │   │                           # Playlist parsing, download
 │   │
 │   └── knowledge_base.py       # Embedding pipeline

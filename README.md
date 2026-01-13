@@ -57,15 +57,37 @@ MAX_USERS=10  # Maximum users allowed
 
 ### Building the Knowledge Base
 
-This is a one-time setup to download transcripts and create embeddings:
+This is a one-time setup to create the vector database from transcripts. There are two methods available:
+
+#### Method 2: HuggingFace Dataset (Recommended)
+
+This is the **recommended approach** - it uses pre-cleaned, high-quality transcripts from a HuggingFace dataset. No API keys required!
 
 ```bash
-# Step 1: Download all transcripts from YouTube (takes ~30 minutes)
+# Build the vector database from HuggingFace dataset (takes ~30-60 minutes)
+python -m data_pipeline.knowledge_base --source huggingface --recreate
+```
+
+**Advantages:**
+- ✅ No API keys needed (no YouTube API, no Supadata API)
+- ✅ Cleaner, better quality transcripts
+- ✅ Faster setup
+- ✅ Free and open source
+
+#### Method 1: YouTube Transcript Fetching (Legacy)
+
+This method downloads transcripts directly from YouTube. Only use if you need the latest transcripts or HuggingFace dataset is unavailable.
+
+```bash
+# Step 1: Download all transcripts from YouTube (requires Supadata API key)
+# Set SUPADATA_API_KEY environment variable first
 python -m data_pipeline.transcript_fetcher
 
-# Step 2: Build the vector database (takes ~1-2 hours depending on API limits)
-python -m data_pipeline.knowledge_base
+# Step 2: Build the vector database from local transcripts
+python -m data_pipeline.knowledge_base --source local --recreate
 ```
+
+**Note:** Method 1 requires a Supadata API key and takes longer. Method 2 is recommended for most users.
 
 ### Running the App
 
@@ -91,7 +113,8 @@ seerah_rag/
 │   ├── db_manager.py           # SQLite operations
 │   └── models.py               # Data models
 ├── data_pipeline/
-│   ├── transcript_fetcher.py   # YouTube transcript extraction
+│   ├── hf_data_loader.py       # HuggingFace dataset loader (Method 2 - recommended)
+│   ├── transcript_fetcher.py   # YouTube transcript extraction (Method 1 - legacy)
 │   └── knowledge_base.py       # Embedding pipeline
 ├── docs/
 │   ├── ARCHITECTURE.md         # System design
@@ -109,11 +132,18 @@ seerah_rag/
 
 ### 1. Data Pipeline
 
-The application processes Yasir Qadhi's Seerah lecture series:
+The application processes Yasir Qadhi's Seerah lecture series using one of two methods:
 
-1. **Transcript Fetching**: Downloads transcripts from all 104 YouTube videos
+**Method 2 (Recommended):** Loads cleaned transcripts from HuggingFace dataset
+1. **Data Loading**: Loads pre-cleaned transcripts from HuggingFace dataset (`rwmasood/transcirpt-seerah-dr-yasir-qadhi`)
 2. **Chunking**: Splits transcripts into ~500-token chunks with overlap
-3. **Embedding**: Generates vector embeddings using Gemini's embedding model
+3. **Embedding**: Generates vector embeddings using HuggingFace sentence-transformers (runs locally, free!)
+4. **Storage**: Stores embeddings in ChromaDB for fast retrieval
+
+**Method 1 (Legacy):** Downloads transcripts from YouTube
+1. **Transcript Fetching**: Downloads transcripts from all 104 YouTube videos (requires Supadata API)
+2. **Chunking**: Splits transcripts into ~500-token chunks with overlap
+3. **Embedding**: Generates vector embeddings using HuggingFace sentence-transformers
 4. **Storage**: Stores embeddings in ChromaDB for fast retrieval
 
 ### 2. Query Processing
@@ -156,14 +186,15 @@ The app is designed for easy deployment on Hugging Face Spaces free tier using D
 #### Step 1: Prepare Your Repository
 
 ```bash
-# Make sure your knowledge base is built
-python -m data_pipeline.transcript_fetcher
-python -m data_pipeline.knowledge_base
+# Build the knowledge base using Method 2 (recommended - no API keys needed)
+python -m data_pipeline.knowledge_base --source huggingface --recreate
 
 # The data/ folder should contain:
-# - chroma_db/ (vector database)
-# - seerah.db (user database - optional, will be created)
+# - chroma_db/ (vector database - required for deployment)
+# - seerah.db (user database - optional, will be created automatically)
 ```
+
+**Note:** Method 2 (HuggingFace) is recommended as it doesn't require any API keys and uses cleaner transcripts.
 
 #### Step 2: Create Hugging Face Space
 

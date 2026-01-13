@@ -3,20 +3,23 @@ Knowledge Base Builder Module
 
 This module handles creating the vector database from transcripts.
 It includes:
-- Loading transcripts from JSON files
-- Semantic chunking with overlap
+- Loading transcripts from HuggingFace (cleaned data) or local JSON files
+- Semantic chunking with overlap (simplified - no timestamp concerns)
 - Generating embeddings using HuggingFace sentence-transformers (free!)
 - Storing in ChromaDB for efficient retrieval
 
 Usage:
-    python -m data_pipeline.knowledge_base
+    # Build from HuggingFace (recommended - cleaner data):
+    python -m data_pipeline.knowledge_base --source huggingface --recreate
+    
+    # Build from local JSON files (legacy):
+    python -m data_pipeline.knowledge_base --source local --recreate
 
 See docs/CHUNKING_STRATEGY.md for detailed chunking approach.
 """
 
 import json
 import sys
-import time
 import re
 from pathlib import Path
 from typing import Generator
@@ -54,12 +57,27 @@ def get_embedding_model() -> SentenceTransformer:
 
 
 # ============================================================================
-# Transcript Loading
+# Transcript Loading - Multiple Sources
 # ============================================================================
 
-def load_transcripts(transcripts_dir: Path = TRANSCRIPTS_DIR) -> list[dict]:
+def load_from_huggingface() -> list[dict]:
     """
-    Load all transcript JSON files from the transcripts directory.
+    Load transcripts from HuggingFace dataset.
+    This is the recommended source - cleaner, better quality transcripts.
+    
+    Returns:
+        List of transcript dictionaries with 'title', 'lecture_number', 'text'
+    """
+    from data_pipeline.hf_data_loader import process_dataset_for_embedding
+    
+    print("Loading from HuggingFace dataset...")
+    return process_dataset_for_embedding()
+
+
+def load_from_local(transcripts_dir: Path = TRANSCRIPTS_DIR) -> list[dict]:
+    """
+    Load all transcript JSON files from the local transcripts directory.
+    This is the legacy source from YouTube auto-captions.
     
     Args:
         transcripts_dir: Directory containing transcript JSON files
@@ -77,14 +95,29 @@ def load_transcripts(transcripts_dir: Path = TRANSCRIPTS_DIR) -> list[dict]:
             
         with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            transcripts.append(data)
+            
+            # Extract full text from segments or use full_text field
+            transcript_data = data.get('transcript', {})
+            if 'full_text' in transcript_data:
+                text = transcript_data['full_text']
+            elif 'segments' in transcript_data:
+                text = ' '.join(seg.get('text', '') for seg in transcript_data['segments'])
+            else:
+                continue
+            
+            transcripts.append({
+                'title': data.get('title', f"Lecture {len(transcripts) + 1}"),
+                'lecture_number': data.get('playlist_index', len(transcripts) + 1),
+                'video_id': data.get('video_id', ''),
+                'text': text,
+            })
     
-    print(f"Loaded {len(transcripts)} transcripts")
+    print(f"Loaded {len(transcripts)} transcripts from local files")
     return transcripts
 
 
 # ============================================================================
-# Text Tokenization (Simple Approximation)
+# Text Processing Utilities
 # ============================================================================
 
 def estimate_tokens(text: str) -> int:
@@ -120,254 +153,38 @@ def split_into_sentences(text: str) -> list[str]:
     return [s.strip() for s in sentences if s.strip()]
 
 
-# ============================================================================
-# Preprocessing - Merge Fragmented Segments
-# ============================================================================
-
-def preprocess_segments(
-    segments: list[dict],
-    target_duration: float = 60.0,
-    min_chars: int = 500
-) -> list[dict]:
+def clean_text(text: str) -> str:
     """
-    Merge fragmented transcript segments into larger, coherent paragraphs.
-    
-    YouTube auto-captions produce very short segments (~7 words each).
-    This function merges them into larger blocks for better chunking.
+    Clean and normalize text for better embedding.
     
     Args:
-        segments: List of transcript segments with 'text', 'start', 'duration'
-        target_duration: Target duration in seconds for merged paragraphs (~60s)
-        min_chars: Minimum characters per merged paragraph
+        text: Raw text
         
     Returns:
-        List of merged paragraph dictionaries with:
-        - text: Merged text content
-        - start: Start timestamp of first segment
-        - end: End timestamp of last segment
+        Cleaned text
     """
-    if not segments:
-        return []
-    
-    merged = []
-    current_texts = []
-    current_start = segments[0].get('start', 0)
-    current_duration = 0
-    
-    for seg in segments:
-        seg_text = seg.get('text', '').strip()
-        seg_start = seg.get('start', 0)
-        seg_duration = seg.get('duration', 0)
-        
-        if not seg_text:
-            continue
-        
-        current_texts.append(seg_text)
-        current_duration = (seg_start + seg_duration) - current_start
-        current_chars = sum(len(t) for t in current_texts)
-        
-        # Create paragraph when we hit target duration or min chars
-        if current_duration >= target_duration or current_chars >= min_chars * 2:
-            merged_text = ' '.join(current_texts)
-            merged.append({
-                'text': merged_text,
-                'start': current_start,
-                'end': seg_start + seg_duration,
-            })
-            
-            # Reset for next paragraph
-            current_texts = []
-            current_start = seg_start + seg_duration
-            current_duration = 0
-    
-    # Don't forget the last paragraph
-    if current_texts:
-        last_seg = segments[-1]
-        merged.append({
-            'text': ' '.join(current_texts),
-            'start': current_start,
-            'end': last_seg.get('start', 0) + last_seg.get('duration', 0),
-        })
-    
-    return merged
+    # Remove excessive whitespace
+    text = re.sub(r'\s+', ' ', text)
+    # Remove any control characters
+    text = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text)
+    return text.strip()
 
 
 # ============================================================================
-# Chunking Strategy
+# Simplified Chunking (No Timestamps)
 # ============================================================================
 
-def chunk_by_segments(
-    segments: list[dict],
-    target_tokens: int = CHUNK_SIZE,
-    overlap_tokens: int = CHUNK_OVERLAP
-) -> list[dict]:
-    """
-    Create chunks from transcript segments with overlap.
-    
-    This chunking strategy:
-    1. Groups consecutive segments until reaching target token count
-    2. Preserves timestamp information for each chunk
-    3. Creates overlap with previous chunk for context continuity
-    
-    Args:
-        segments: List of transcript segments with 'text', 'start', 'duration'
-        target_tokens: Target tokens per chunk
-        overlap_tokens: Overlap tokens between chunks
-        
-    Returns:
-        List of chunk dictionaries with:
-        - text: Chunk text content
-        - start_time: Start timestamp in seconds
-        - end_time: End timestamp in seconds
-        - segment_indices: Indices of original segments in this chunk
-    """
-    if not segments:
-        return []
-    
-    chunks = []
-    current_chunk_segments = []
-    current_tokens = 0
-    overlap_segments = []
-    
-    for i, segment in enumerate(segments):
-        segment_text = segment.get('text', '')
-        segment_tokens = estimate_tokens(segment_text)
-        
-        # If adding this segment exceeds target, create chunk
-        if current_tokens + segment_tokens > target_tokens and current_chunk_segments:
-            # Build chunk from current segments
-            chunk = build_chunk_from_segments(current_chunk_segments, segments)
-            chunks.append(chunk)
-            
-            # Calculate overlap segments
-            overlap_segments = []
-            overlap_token_count = 0
-            for seg in reversed(current_chunk_segments):
-                seg_tokens = estimate_tokens(seg.get('text', ''))
-                if overlap_token_count + seg_tokens <= overlap_tokens:
-                    overlap_segments.insert(0, seg)
-                    overlap_token_count += seg_tokens
-                else:
-                    break
-            
-            # Start new chunk with overlap
-            current_chunk_segments = overlap_segments.copy()
-            current_tokens = sum(estimate_tokens(s.get('text', '')) for s in current_chunk_segments)
-        
-        # Add current segment
-        current_chunk_segments.append(segment)
-        current_tokens += segment_tokens
-    
-    # Don't forget the last chunk
-    if current_chunk_segments:
-        chunk = build_chunk_from_segments(current_chunk_segments, segments)
-        chunks.append(chunk)
-    
-    return chunks
-
-
-def build_chunk_from_segments(chunk_segments: list[dict], all_segments: list[dict]) -> dict:
-    """
-    Build a chunk dictionary from a list of segments.
-    
-    Args:
-        chunk_segments: Segments to include in chunk
-        all_segments: All segments (for index lookup)
-        
-    Returns:
-        Chunk dictionary
-    """
-    text = ' '.join(seg.get('text', '') for seg in chunk_segments)
-    
-    start_time = chunk_segments[0].get('start', 0)
-    last_seg = chunk_segments[-1]
-    
-    # Handle both formats: 'end' (from merged paragraphs) or 'start' + 'duration' (raw segments)
-    if 'end' in last_seg:
-        end_time = last_seg.get('end', 0)
-    else:
-        end_time = last_seg.get('start', 0) + last_seg.get('duration', 0)
-    
-    # Find segment indices
-    segment_indices = []
-    for seg in chunk_segments:
-        try:
-            idx = all_segments.index(seg)
-            segment_indices.append(idx)
-        except ValueError:
-            pass
-    
-    return {
-        'text': text,
-        'start_time': start_time,
-        'end_time': end_time,
-        'segment_indices': segment_indices,
-    }
-
-
-def chunk_transcript(transcript: dict) -> list[dict]:
-    """
-    Chunk a single transcript into retrievable chunks.
-    
-    Pipeline:
-    1. Get raw segments from transcript
-    2. Preprocess: merge fragmented segments into paragraphs (~60s each)
-    3. Chunk: split paragraphs into ~500 token chunks with overlap
-    4. Add metadata to each chunk
-    
-    Args:
-        transcript: Full transcript dictionary with metadata and segments
-        
-    Returns:
-        List of chunk dictionaries with video metadata
-    """
-    # Get transcript segments
-    raw_segments = transcript.get('transcript', {}).get('segments', [])
-    
-    if not raw_segments:
-        # Fallback: chunk the full text if no segments
-        full_text = transcript.get('transcript', {}).get('full_text', '')
-        if not full_text:
-            return []
-        
-        chunks = chunk_full_text(full_text)
-    else:
-        # Step 1: Preprocess - merge fragmented segments into larger paragraphs
-        # This handles YouTube's short segments (~7 words each)
-        merged_paragraphs = preprocess_segments(raw_segments, target_duration=60.0)
-        
-        # Step 2: Chunk the merged paragraphs
-        if merged_paragraphs:
-            chunks = chunk_by_segments(merged_paragraphs)
-        else:
-            # Fallback to full text if preprocessing fails
-            full_text = transcript.get('transcript', {}).get('full_text', '')
-            chunks = chunk_full_text(full_text) if full_text else []
-    
-    # Add video metadata to each chunk
-    video_metadata = {
-        'video_id': transcript.get('video_id', ''),
-        'title': transcript.get('title', ''),
-        'playlist_index': transcript.get('playlist_index', 0),
-    }
-    
-    for i, chunk in enumerate(chunks):
-        chunk['chunk_index'] = i
-        chunk.update(video_metadata)
-        # Create unique ID for this chunk
-        chunk['id'] = f"{video_metadata['video_id']}_{i:04d}"
-    
-    return chunks
-
-
-def chunk_full_text(
+def chunk_text(
     text: str,
     target_tokens: int = CHUNK_SIZE,
     overlap_tokens: int = CHUNK_OVERLAP
-) -> list[dict]:
+) -> list[str]:
     """
-    Fallback chunking for full text without segments.
+    Chunk text into smaller pieces with overlap.
     Uses sentence boundaries for cleaner chunks.
+    
+    This simplified approach focuses purely on content quality,
+    without worrying about timestamps or video positions.
     
     Args:
         text: Full transcript text
@@ -375,28 +192,44 @@ def chunk_full_text(
         overlap_tokens: Overlap tokens between chunks
         
     Returns:
-        List of chunk dictionaries
+        List of text chunks
     """
+    # Clean the text first
+    text = clean_text(text)
+    
+    # Split into sentences
     sentences = split_into_sentences(text)
+    
+    if not sentences:
+        # If no clear sentences, fall back to simple splitting
+        return simple_chunk_text(text, target_tokens, overlap_tokens)
     
     chunks = []
     current_sentences = []
     current_tokens = 0
-    overlap_sentences = []
     
     for sentence in sentences:
         sentence_tokens = estimate_tokens(sentence)
         
+        # If this sentence alone is too big, split it
+        if sentence_tokens > target_tokens:
+            # Flush current chunk first
+            if current_sentences:
+                chunks.append(' '.join(current_sentences))
+                current_sentences = []
+                current_tokens = 0
+            
+            # Split the long sentence
+            sub_chunks = simple_chunk_text(sentence, target_tokens, overlap_tokens)
+            chunks.extend(sub_chunks)
+            continue
+        
+        # If adding this sentence exceeds target, create chunk
         if current_tokens + sentence_tokens > target_tokens and current_sentences:
             # Create chunk
-            chunk_text = ' '.join(current_sentences)
-            chunks.append({
-                'text': chunk_text,
-                'start_time': 0,
-                'end_time': 0,
-            })
+            chunks.append(' '.join(current_sentences))
             
-            # Calculate overlap
+            # Calculate overlap - keep last few sentences
             overlap_sentences = []
             overlap_count = 0
             for s in reversed(current_sentences):
@@ -407,20 +240,108 @@ def chunk_full_text(
                 else:
                     break
             
-            current_sentences = overlap_sentences.copy()
+            current_sentences = overlap_sentences
             current_tokens = overlap_count
         
         current_sentences.append(sentence)
         current_tokens += sentence_tokens
     
-    # Last chunk
+    # Don't forget the last chunk
     if current_sentences:
-        chunk_text = ' '.join(current_sentences)
-        chunks.append({
-            'text': chunk_text,
-            'start_time': 0,
-            'end_time': 0,
-        })
+        chunks.append(' '.join(current_sentences))
+    
+    # Filter out chunks that are too small
+    min_tokens = MIN_CHUNK_SIZE
+    chunks = [c for c in chunks if estimate_tokens(c) >= min_tokens]
+    
+    return chunks
+
+
+def simple_chunk_text(
+    text: str,
+    target_tokens: int = CHUNK_SIZE,
+    overlap_tokens: int = CHUNK_OVERLAP
+) -> list[str]:
+    """
+    Simple character-based chunking fallback.
+    Used when sentence splitting doesn't work well.
+    
+    Args:
+        text: Text to chunk
+        target_tokens: Target tokens per chunk
+        overlap_tokens: Overlap tokens between chunks
+        
+    Returns:
+        List of text chunks
+    """
+    # Estimate characters per chunk (4 chars per token)
+    target_chars = target_tokens * 4
+    overlap_chars = overlap_tokens * 4
+    
+    chunks = []
+    start = 0
+    
+    while start < len(text):
+        end = start + target_chars
+        
+        # Try to break at a word boundary
+        if end < len(text):
+            # Look for last space before end
+            space_idx = text.rfind(' ', start, end)
+            if space_idx > start:
+                end = space_idx
+        
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        
+        # Move start, accounting for overlap
+        start = end - overlap_chars
+        if start < 0:
+            start = end
+    
+    return chunks
+
+
+def chunk_transcript(transcript: dict) -> list[dict]:
+    """
+    Chunk a single transcript into retrievable chunks.
+    
+    Simplified pipeline (no timestamps):
+    1. Get clean text from transcript
+    2. Chunk into semantic pieces with overlap
+    3. Add metadata to each chunk
+    
+    Args:
+        transcript: Transcript dictionary with 'title', 'lecture_number', 'text'
+        
+    Returns:
+        List of chunk dictionaries with metadata
+    """
+    text = transcript.get('text', '')
+    
+    if not text or len(text) < MIN_CHUNK_SIZE * 4:
+        return []
+    
+    # Chunk the text
+    text_chunks = chunk_text(text)
+    
+    # Build chunk dictionaries with metadata
+    chunks = []
+    lecture_num = transcript.get('lecture_number', 0)
+    title = transcript.get('title', f'Lecture {lecture_num}')
+    video_id = transcript.get('video_id', '')
+    
+    for i, chunk_content in enumerate(text_chunks):
+        chunk = {
+            'id': f"lecture_{lecture_num:03d}_chunk_{i:04d}",
+            'text': chunk_content,
+            'title': title,
+            'lecture_number': lecture_num,
+            'video_id': video_id,
+            'chunk_index': i,
+        }
+        chunks.append(chunk)
     
     return chunks
 
@@ -440,7 +361,8 @@ def chunk_all_transcripts(transcripts: list[dict]) -> list[dict]:
     for transcript in transcripts:
         chunks = chunk_transcript(transcript)
         all_chunks.extend(chunks)
-        print(f"  Chunked '{transcript.get('title', 'Unknown')[:40]}...' into {len(chunks)} chunks")
+        title = transcript.get('title', 'Unknown')[:40]
+        print(f"  Chunked '{title}...' into {len(chunks)} chunks")
     
     print(f"Total chunks created: {len(all_chunks)}")
     return all_chunks
@@ -547,7 +469,7 @@ def get_or_create_collection(
     """
     collection = client.get_or_create_collection(
         name=collection_name,
-        metadata={"description": "Seerah lecture transcripts knowledge base"}
+        metadata={"description": "Seerah lecture transcripts knowledge base (HuggingFace cleaned data)"}
     )
     return collection
 
@@ -584,7 +506,7 @@ def build_vector_store(
     # Check if collection already has documents
     existing_count = collection.count()
     if existing_count > 0 and not recreate:
-        print(f"Collection already has {existing_count} documents. Use recreate=True to rebuild.")
+        print(f"Collection already has {existing_count} documents. Use --recreate to rebuild.")
         return collection
     
     print(f"Building vector store with {len(chunks)} chunks...")
@@ -596,12 +518,10 @@ def build_vector_store(
         documents = [chunk['text'] for chunk in batch_chunks]
         metadatas = [
             {
-                'video_id': chunk.get('video_id', ''),
                 'title': chunk.get('title', ''),
-                'playlist_index': chunk.get('playlist_index', 0),
+                'lecture_number': chunk.get('lecture_number', 0),
+                'video_id': chunk.get('video_id', ''),
                 'chunk_index': chunk.get('chunk_index', 0),
-                'start_time': chunk.get('start_time', 0),
-                'end_time': chunk.get('end_time', 0),
             }
             for chunk in batch_chunks
         ]
@@ -623,6 +543,7 @@ def build_vector_store(
 # ============================================================================
 
 def build_knowledge_base(
+    source: str = "huggingface",
     transcripts_dir: Path = TRANSCRIPTS_DIR,
     chroma_dir: Path = CHROMA_DB_DIR,
     recreate: bool = False
@@ -630,13 +551,14 @@ def build_knowledge_base(
     """
     Full pipeline to build the knowledge base.
     
-    1. Load transcripts from JSON files
+    1. Load transcripts from source (HuggingFace or local)
     2. Chunk transcripts using semantic chunking
-    3. Generate embeddings using Gemini
+    3. Generate embeddings using sentence-transformers
     4. Store in ChromaDB
     
     Args:
-        transcripts_dir: Directory containing transcript JSON files
+        source: Data source - 'huggingface' (recommended) or 'local'
+        transcripts_dir: Directory containing local transcript JSON files
         chroma_dir: Directory for ChromaDB persistence
         recreate: If True, rebuild the entire knowledge base
         
@@ -645,14 +567,19 @@ def build_knowledge_base(
     """
     print("=" * 60)
     print("Building Seerah Knowledge Base")
+    print(f"Source: {source.upper()}")
     print("=" * 60)
     
     # Step 1: Load transcripts
     print("\n[1/3] Loading transcripts...")
-    transcripts = load_transcripts(transcripts_dir)
+    
+    if source == "huggingface":
+        transcripts = load_from_huggingface()
+    else:
+        transcripts = load_from_local(transcripts_dir)
     
     if not transcripts:
-        print("No transcripts found! Run transcript_fetcher.py first.")
+        print("No transcripts found!")
         return {'error': 'No transcripts found'}
     
     # Step 2: Chunk transcripts
@@ -665,6 +592,7 @@ def build_knowledge_base(
     
     # Summary
     summary = {
+        'source': source,
         'transcripts_loaded': len(transcripts),
         'chunks_created': len(chunks),
         'vectors_stored': collection.count(),
@@ -674,6 +602,7 @@ def build_knowledge_base(
     print("\n" + "=" * 60)
     print("BUILD COMPLETE")
     print("=" * 60)
+    print(f"Source: {summary['source']}")
     print(f"Transcripts loaded: {summary['transcripts_loaded']}")
     print(f"Chunks created: {summary['chunks_created']}")
     print(f"Vectors stored: {summary['vectors_stored']}")
@@ -694,9 +623,15 @@ def main():
         description='Build Seerah knowledge base from transcripts'
     )
     parser.add_argument(
+        '--source',
+        choices=['huggingface', 'local'],
+        default='huggingface',
+        help='Data source: huggingface (recommended) or local JSON files'
+    )
+    parser.add_argument(
         '--transcripts-dir',
         default=str(TRANSCRIPTS_DIR),
-        help='Directory containing transcript JSON files'
+        help='Directory containing local transcript JSON files (only for --source local)'
     )
     parser.add_argument(
         '--chroma-dir',
@@ -712,6 +647,7 @@ def main():
     args = parser.parse_args()
     
     build_knowledge_base(
+        source=args.source,
         transcripts_dir=Path(args.transcripts_dir),
         chroma_dir=Path(args.chroma_dir),
         recreate=args.recreate

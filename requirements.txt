@@ -4,9 +4,9 @@ streamlit>=1.28.0
 # Google Gemini AI
 google-generativeai>=0.3.0
 
-# YouTube Data Extraction
-yt-dlp>=2023.10.0
-requests>=2.31.0  # For Supadata API
+# YouTube Data Extraction (Method 1 - Legacy, only needed if using transcript_fetcher)
+yt-dlp>=2023.10.0  # Only needed for Method 1 (legacy YouTube fetching)
+requests>=2.31.0  # Only needed for Method 1 (Supadata API)
 
 # Vector Database
 chromadb>=0.4.0
@@ -23,3 +23,6 @@ nltk>=3.8.0
 
 # Embeddings (HuggingFace - runs locally, free!)
 sentence-transformers>=2.2.0
+
+# HuggingFace Datasets (for loading cleaned transcripts)
+datasets>=2.14.0

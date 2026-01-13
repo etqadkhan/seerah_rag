@@ -14,7 +14,6 @@ This is the main query processing pipeline that ties together:
 - Memory (ChatMemory)
 """
 
-import json
 import sys
 from pathlib import Path
 from typing import Optional
@@ -41,7 +40,7 @@ from config.settings import (
     SYSTEM_PROMPT,
 )
 from core.chat_memory import ChatMemory
-from core.guardrails import check_query, ContentAction, GuardrailResult
+from core.guardrails import check_query, ContentAction
 
 
 # Configure Gemini (for LLM only, embeddings use HuggingFace)
@@ -65,10 +64,8 @@ class RetrievedChunk:
     text: str
     video_id: str
     title: str
-    playlist_index: int
+    lecture_number: int
     chunk_index: int
-    start_time: float
-    end_time: float
     distance: float  # Lower is more similar
     
     @property
@@ -79,18 +76,17 @@ class RetrievedChunk:
     
     @property
     def youtube_link(self) -> str:
-        """Generate YouTube link with timestamp."""
-        timestamp = int(self.start_time)
-        return f"https://www.youtube.com/watch?v={self.video_id}&t={timestamp}s"
+        """Generate YouTube link (no timestamp since we don't track them)."""
+        if self.video_id:
+            return f"https://www.youtube.com/watch?v={self.video_id}"
+        return ""
     
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
             'video_id': self.video_id,
             'title': self.title,
-            'playlist_index': self.playlist_index,
-            'start_time': self.start_time,
-            'end_time': self.end_time,
+            'lecture_number': self.lecture_number,
             'youtube_link': self.youtube_link,
             'similarity': self.similarity_score,
         }
@@ -120,7 +116,7 @@ class SeerahRetriever:
     
     This class handles:
     1. Querying ChromaDB for relevant chunks
-    2. Embedding user queries using Gemini
+    2. Embedding user queries using sentence-transformers
     3. Building context from retrieved chunks
     4. Generating responses using Gemini LLM
     5. Integrating conversation memory
@@ -235,14 +231,15 @@ class SeerahRetriever:
             distances = results['distances'][0]
             
             for doc, meta, dist in zip(documents, metadatas, distances):
+                # Support both old schema (playlist_index) and new schema (lecture_number)
+                lecture_num = meta.get('lecture_number', meta.get('playlist_index', 0))
+                
                 chunk = RetrievedChunk(
                     text=doc,
                     video_id=meta.get('video_id', ''),
                     title=meta.get('title', ''),
-                    playlist_index=meta.get('playlist_index', 0),
+                    lecture_number=lecture_num,
                     chunk_index=meta.get('chunk_index', 0),
-                    start_time=meta.get('start_time', 0),
-                    end_time=meta.get('end_time', 0),
                     distance=dist
                 )
                 
@@ -273,7 +270,7 @@ class SeerahRetriever:
         
         for i, chunk in enumerate(chunks, 1):
             context_parts.append(
-                f"[Source {i}: {chunk.title} (Lecture {chunk.playlist_index})]\n"
+                f"[Source {i}: {chunk.title} (Lecture {chunk.lecture_number})]\n"
                 f"{chunk.text}\n"
             )
         
@@ -453,22 +450,23 @@ def format_sources_for_display(sources: list[RetrievedChunk]) -> str:
     
     lines = ["**Sources:**"]
     
-    # Group by video
-    seen_videos = set()
+    # Group by lecture to avoid duplicates
+    seen_lectures = set()
     
     for source in sources:
-        if source.video_id not in seen_videos:
-            seen_videos.add(source.video_id)
+        lecture_key = (source.lecture_number, source.title)
+        if lecture_key not in seen_lectures:
+            seen_lectures.add(lecture_key)
             
-            # Format timestamp
-            minutes = int(source.start_time // 60)
-            seconds = int(source.start_time % 60)
-            timestamp = f"{minutes}:{seconds:02d}"
-            
-            lines.append(
-                f"- [{source.title}]({source.youtube_link}) "
-                f"(Lecture {source.playlist_index}, ~{timestamp})"
-            )
+            if source.youtube_link:
+                lines.append(
+                    f"- [{source.title}]({source.youtube_link}) "
+                    f"(Lecture {source.lecture_number})"
+                )
+            else:
+                lines.append(
+                    f"- {source.title} (Lecture {source.lecture_number})"
+                )
     
     return "\n".join(lines)
 

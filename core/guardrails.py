@@ -54,17 +54,25 @@ class ContentGuardrails:
     
     # Tier 1: Offensive content patterns (fast keyword filter)
     BLOCKED_PATTERNS = [
-        # Profanity and slurs (keeping list minimal but effective)
-        r'\b(fuck|shit|damn|ass|bitch|bastard|crap)\b',
+        # Profanity and slurs
+        r'\b(fuck|shit|damn|ass|bitch|bastard|crap|hell)\b',
         r'\b(nigger|faggot|retard|spic|chink|kike)\b',
         # Hate speech indicators
         r'\b(kill\s+(all\s+)?(muslims?|jews?|christians?|hindus?))\b',
         r'\b(death\s+to)\b',
         r'\b(terrorist|terrorism)\s+(is\s+)?(good|great|awesome)\b',
+        # Disrespectful content about Prophet or Islam
+        r'\b(prophet\s+)?(muhammad|mohammed|pbuh)\s+(is\s+)?(fake|false|liar|pedophile|pedo|rapist|murderer|terrorist)\b',
+        r'\b(islam\s+is\s+)?(evil|bad|wrong|violent|terrorist|fake|false)\b',
+        r'\b(quran|qur\'?an|koran)\s+(is\s+)?(fake|false|wrong|evil)\b',
+        r'\b(muslims?\s+are\s+)?(terrorists?|evil|bad|violent)\b',
         # Sexually explicit
-        r'\b(porn|xxx|nude|naked|sex\s+with)\b',
+        r'\b(porn|xxx|nude|naked|sex\s+with|sexual)\b',
         # Violence incitement
-        r'\b(how\s+to\s+(kill|murder|bomb|attack))\b',
+        r'\b(how\s+to\s+(kill|murder|bomb|attack|hurt|harm))\b',
+        r'\b(make\s+(a\s+)?(bomb|weapon|explosive))\b',
+        # Attempts to bypass filters (common variations)
+        r'\b(f\*ck|f\*\*k|sh\*t|n\*\*\*er|f\*\*\*ot)\b',
     ]
     
     # Compile patterns for efficiency
@@ -209,12 +217,28 @@ class ContentGuardrails:
         Returns:
             GuardrailResult based on LLM classification
         """
-        classification_prompt = f"""You are a content moderator for an Islamic educational app about the Seerah (biography) of Prophet Muhammad ﷺ.
+        classification_prompt = f"""You are a strict content moderator for an Islamic educational app about the Seerah (biography) of Prophet Muhammad ﷺ.
 
 Classify the following user query into one of these categories:
-1. RELEVANT - Related to Islamic history, Prophet Muhammad, his companions, early Islam, or the Seerah lecture series
-2. OFF_TOPIC - Not related to Seerah/Islam but not offensive (e.g., asking about weather, sports, coding)
-3. INAPPROPRIATE - Offensive, disrespectful, or harmful content
+
+1. RELEVANT - Only if the query is genuinely related to:
+   - Islamic history, Prophet Muhammad ﷺ, his companions, early Islam
+   - The Seerah lecture series by Shaykh Yasir Qadhi
+   - Questions about Islamic teachings, practices, or history in the context of the Seerah
+
+2. OFF_TOPIC - If the query is:
+   - Not related to Seerah/Islam but not offensive (e.g., weather, sports, coding, general knowledge)
+   - Asking about topics completely unrelated to Islamic history or the Prophet's life
+
+3. INAPPROPRIATE - If the query contains:
+   - Disrespectful, offensive, or harmful content about Prophet Muhammad ﷺ, Islam, or Muslims
+   - Profanity, hate speech, or discriminatory language
+   - Attempts to mock, insult, or defame Islamic beliefs or figures
+   - Sexually explicit content
+   - Violence incitement
+   - Any content that would be inappropriate for an Islamic educational platform
+
+Be STRICT. When in doubt between RELEVANT and OFF_TOPIC, choose OFF_TOPIC. When in doubt between OFF_TOPIC and INAPPROPRIATE, choose INAPPROPRIATE.
 
 User query: "{query}"
 
@@ -224,13 +248,14 @@ Respond with ONLY one word: RELEVANT, OFF_TOPIC, or INAPPROPRIATE"""
             response = self.model.generate_content(
                 classification_prompt,
                 generation_config=genai.GenerationConfig(
-                    temperature=0.1,  # Low temperature for consistent classification
+                    temperature=0.0,  # Zero temperature for maximum consistency
                     max_output_tokens=20,
                 )
             )
             
             classification = response.text.strip().upper()
             
+            # Be strict: check for inappropriate first, then off-topic
             if 'INAPPROPRIATE' in classification:
                 return GuardrailResult(
                     action=ContentAction.BLOCK,
@@ -243,15 +268,22 @@ Respond with ONLY one word: RELEVANT, OFF_TOPIC, or INAPPROPRIATE"""
                     message=self.REDIRECT_MESSAGE,
                     reason="LLM classified as off-topic"
                 )
-            else:
-                # RELEVANT or any other response - allow it
+            elif 'RELEVANT' in classification:
+                # Only allow if explicitly classified as RELEVANT
                 return GuardrailResult(action=ContentAction.ALLOW)
+            else:
+                # Unknown classification - be conservative and redirect
+                return GuardrailResult(
+                    action=ContentAction.REDIRECT,
+                    message=self.REDIRECT_MESSAGE,
+                    reason=f"Unclear classification: {classification}"
+                )
                 
         except Exception as e:
-            # If classification fails, allow the query (fail open for usability)
-            # The RAG system will handle it appropriately
+            # If classification fails, be conservative and redirect (fail closed for safety)
             return GuardrailResult(
-                action=ContentAction.ALLOW,
+                action=ContentAction.REDIRECT,
+                message=self.REDIRECT_MESSAGE,
                 reason=f"Classification error: {e}"
             )
 

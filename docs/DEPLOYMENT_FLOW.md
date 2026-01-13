@@ -61,7 +61,11 @@ seerah_rag/
 
 ```bash
 # Step 1: Fetch transcripts from YouTube
-python -m data_pipeline.transcript_fetcher
+# Method 2 (Recommended): Build from HuggingFace dataset (no API keys needed)
+python -m data_pipeline.knowledge_base --source huggingface --recreate
+
+# Method 1 (Legacy): If you need to fetch from YouTube instead
+# python -m data_pipeline.transcript_fetcher
 # Creates: data/transcripts/*.json (104 files)
 
 # Step 2: Build embeddings and vector store
