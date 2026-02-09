@@ -290,7 +290,3 @@ MIT License - See LICENSE file for details.
 ## Disclaimer
 
 This application is an educational tool. The AI-generated responses are based on the lecture transcripts and may not always be perfectly accurate. For authoritative Islamic knowledge, please consult qualified scholars.
-
----
-
-*Built with ❤️*
